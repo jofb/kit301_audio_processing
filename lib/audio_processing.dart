@@ -1,15 +1,11 @@
 import 'dart:typed_data';
 
-import 'package:flutter/material.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'dart:math';
-// import 'package:flutter/services.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
-import 'dart:io';
-import 'package:ffmpeg_kit_flutter_audio/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_audio/ffprobe_kit.dart';
 import 'package:fftea/fftea.dart';
-import 'package:csv/csv.dart';
 
 // adapted from scipy.signal.resample
 // resamples given audio into new length
@@ -30,6 +26,7 @@ Float64List? resampleAudio(List<double> x, int num) {
   // Float64x2List Y = Float64x2List(N); // old
 
   Y.setRange(0, nyq, X.sublist(0, nyq).toList()); // copy X[:nyq] to Y[:nyq]
+  print(num);
 
   if(N % 2 == 0) {
     if (num < Nx) {
@@ -44,15 +41,14 @@ Float64List? resampleAudio(List<double> x, int num) {
   }
 
   // padding zeros
-  Float64x2List newY = Float64x2List(num);
-  newY.setRange(0, nyq, Y.sublist(0));
+  Float64x2List newY = Float64x2List(num); // len 140000
+  newY.setRange(0, Y.length, Y.sublist(0)); // Y > newY,
 
   final fft2 = FFT(Y.length);
   // inverse transforms
   //print(Y);
   //fft2.realInverseFft(newY);
   //print(newY);
-  //print(newY[num - 1]);
   //Float64List y = customInverseFft(newY, fft2, nyq);
   final complexArray = Float64x2List.fromList([
     Float64x2(1.0, 0.0),
@@ -60,8 +56,9 @@ Float64List? resampleAudio(List<double> x, int num) {
     Float64x2(1.0, 0.0),
     Float64x2(0.0, 0.0),
   ]);
-  Float64List y = customInverseFft(complexArray, FFT(complexArray.length));
-
+  print(Y);
+  Float64List y = customInverseFft(Y, FFT(Y.length));
+  print(y);
   //Float64List y = customInverseFft(newY, FFT(newY.length));
   //print(y);
   //print(y);
@@ -86,7 +83,6 @@ Float64List customInverseFft(Float64x2List complexArray, FFT f) {
   for (int i = 1; i < len; ++i) {
     r[i] = complexArray[len - i].x * scale;
   }
-  print(r);
   return r;
 }
 
@@ -116,8 +112,10 @@ Future<Map<String, dynamic>> readMP3(inputPath, {resample = 16000}) async {
   // }
 
   // grab the raw data
-  final pcmData = await getPCMData(outputPath);
+  //final pcmData = await getPCMData(outputPath);
   // REMOVE THESE TWO LINES
+  final bytes = await rootBundle.load('assets/output.raw');
+  final pcmData = Float32List.view(bytes.buffer);
 
   // calc the new length based on resample rate
   final newLength = (pcmData.length * resample / sampleRate).round();
@@ -127,21 +125,4 @@ Future<Map<String, dynamic>> readMP3(inputPath, {resample = 16000}) async {
 
   Map<String, dynamic> audio = {"signal": signal,"rate": resample};
   return audio;
-}
-
-Future<Float32List> getPCMData(String path) async {
-  final file = File(path);
-  if(!await file.exists()) {
-    throw Exception('File not found at $path');
-  }
-  final bytes = await file.readAsBytes();
-  final buffer = Float32List.view(bytes.buffer);
-
-  // delete file
-  file.delete();
-  return buffer;
-}
-
-void main() {
-  final audio = readMP3('sample.mp3', resample: 16000);
 }
