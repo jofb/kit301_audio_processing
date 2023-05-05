@@ -4,8 +4,66 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 import 'dart:math';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'dart:io';
+import 'package:ffmpeg_kit_flutter_audio/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_audio/ffprobe_kit.dart';
 import 'package:fftea/fftea.dart';
+import 'package:flutter_sound/flutter_sound.dart';
+import 'package:permission_handler/permission_handler.dart';
+
+Future<Float32List?> recordAudio() async {
+  final tempDir = await getTemporaryDirectory();
+
+  final FlutterSoundRecorder recorder = FlutterSoundRecorder();
+
+  if(!(await Permission.microphone.request().isGranted)) {
+    print("No permissions!");
+    return null;
+  }
+  await recorder.openRecorder();
+  print(await recorder.isEncoderSupported(Codec.aacADTS));
+  await recorder.startRecorder(
+      codec: Codec.defaultCodec,
+      toFile: "${tempDir.path}/my23coolrecording",
+      sampleRate: 16000
+  );
+
+  await Future.delayed(Duration(seconds: 8));
+
+  final url = await recorder.stopRecorder();
+  await recorder.closeRecorder();
+
+  // output path for raw data
+  final String outputPath = "${tempDir.path}/out.raw";
+
+  // ffmpeg command
+  final String command = "-i ${tempDir.path}/my23coolrecording -f f32le -acodec pcm_f32le $outputPath";
+
+  // execute the command
+  final ffmpegSession = await FFmpegKit.executeAsync(command);
+  final returnCode = await ffmpegSession.getReturnCode().then((value) => value?.getValue());
+
+  if(returnCode != 1) {
+    throw Exception('FFMPEG Conversion Failed!\n ${await ffmpegSession.getOutput()}');
+  }
+  final pcmData = await getPCMData(outputPath);
+  print(pcmData.length);
+
+  return pcmData;
+}
+
+Future<Float32List> getPCMData(String path) async {
+  final file = File(path);
+  if(!await file.exists()) {
+    throw Exception('File not found at $path');
+  }
+  final bytes = await file.readAsBytes();
+  final buffer = Float32List.view(bytes.buffer);
+
+  // delete file
+  file.delete();
+  return buffer;
+}
 
 // adapted from scipy.signal.resample
 // resamples given audio into new length
