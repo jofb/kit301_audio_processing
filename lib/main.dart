@@ -1,6 +1,8 @@
+import 'dart:ffi';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:scidart/numdart.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'dart:math';
 import 'package:flutter/services.dart';
@@ -9,7 +11,11 @@ import 'dart:io';
 import 'package:ffmpeg_kit_flutter_audio/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_audio/ffprobe_kit.dart';
 import 'package:fftea/fftea.dart';
+import 'package:fftea/stft.dart';
 import 'audio_processing.dart';
+import 'package:wav/wav.dart';
+import 'package:ml_linalg/linalg.dart';
+// import 'package:dart_tensor/dart_tensor.dart';
 
 void main() {
   runApp(const MainApp());
@@ -18,11 +24,273 @@ void main() {
 class MainApp extends StatelessWidget {
   const MainApp({super.key});
 
-  Future<void> btnListener()
-  async {
+  // mel spectrum constants.
+  final MEL_BREAK_FREQUENCY_HERTZ = 700.0;
+  final MEL_HIGH_FREQUENCY_Q = 1127.0;
 
+  int msFrames(int sampleRate, int ms) {
+    return ((sampleRate.toDouble()) * 1e-3 * (ms.toDouble())).toInt();
+  }
+
+  List<double> hertzToMel(List<double> frequencies) {
+    // this is meant to be list mapping
+    return frequencies
+        .map((frequency) =>
+            MEL_HIGH_FREQUENCY_Q *
+            log(1.0 + (frequency / MEL_BREAK_FREQUENCY_HERTZ)))
+        .toList();
+  }
+
+  Future<void> btnListener() async {
     /******************* SPECTROGRAM STUFF *******************/
     // the resampled audio is in the assets folder under filtered_audio.wav
+    print('hello!');
+
+    // 1. create normal spectrogram based on lidbox implementation
+    // spectrograms(signal, rate)
+    const sampleRate = 16000;
+    const frameLengthMS = 25;
+    const frameStepMS = 10;
+    const power = 2.0;
+    const fmin = 0.0;
+    const fmax = 8000.0;
+    const fftLength = 512;
+
+    var frameLength = msFrames(sampleRate, frameLengthMS);
+    var frameStep = msFrames(sampleRate, frameStepMS);
+
+    print(frameStep);
+    print(fftLength);
+
+    // https: //pub.dev/documentation/fftea/latest/
+
+    List<double> audio = [1.0, 2.0, 3.0, 4.0];
+    List<double> aud = List.filled(513, 3.5);
+    // (10000) / 160 = num_frames
+
+    // final asset = await rootBundle.load("assets/filtered_audio.wav");
+    // final buffer = asset.buffer;
+
+    // final oceanWaves = await Wav.readFile('assets/filtered_audio.wav');
+    // print(oceanWaves.format);
+
+    final stft = STFT(fftLength, Window.hanning(fftLength));
+    var spectrogram = <Float64List>[];
+    stft.run(aud, (Float64x2List freq) {
+      spectrogram.add(freq.discardConjugates().magnitudes());
+    }, frameStep);
+
+    // num frames = spectrogram.length
+
+    //  [[1, 2, 3],
+    //  [1, 2, 3]]
+
+    // this is our output for a pow spectrograms
+    List<List<double>> powpow = [];
+    spectrogram.forEach((element) {
+      powpow.add(element.map((e) => pow(e.abs(), power).toDouble()).toList());
+    });
+    print(powpow.length);
+    var powspec =
+        spectrogram[0].map((e) => pow(e.abs(), power).toDouble()).toList();
+
+    /******************* MEL SPECTROGRAM MATRIX WEIGHTS *****/
+
+    //   def linear_to_mel_weight_matrix(num_mel_bins=20,
+    //                               num_spectrogram_bins=129,
+    //                               sample_rate=8000,
+    //                               lower_edge_hertz=125.0,
+    //                               upper_edge_hertz=3800.0,
+    //                               dtype=dtypes.float32,
+    //                               name=None):
+    const numMelBins = 40;
+    const numSpectrogramBins = 129;
+    const lowerEdgeHertz = 125.0;
+    const upperEdgeHertz = 3800.0;
+
+    // ensure sampleRate is a float
+
+    // TODO PARAMETER VALIDATION (IGNORE FOR NOW)
+    //   _validate_arguments(num_mel_bins, sample_rate,
+    //                       lower_edge_hertz, upper_edge_hertz, dtype)
+
+    // cast samplerate to float32
+    // cast loweredgehertz to float32 tensor
+    // cast upperedgehertz to float32 tensor
+    // create zeros tensor of float32
+
+    // linear_frequencies = linspace(start: zero, stop: nyquist, num: num_spectrogram_bins)
+
+    //   # HTK excludes the spectrogram DC bin.
+    //   bands_to_zero = 1
+    //   nyquist_hertz = sample_rate / 2.0
+    //   linear_frequencies = math_ops.linspace(
+    //       zero, nyquist_hertz, num_spectrogram_bins)[bands_to_zero:]
+    // linspace([0], [8000], 129)
+
+    const bandsToZero = 1;
+
+    List<double> linearFrequencies = [];
+
+    var nyquistHertz = sampleRate / 2.0;
+    var stepValue = nyquistHertz / (powspec.length);
+    for (var stepCount = 1; stepCount <= powspec.length; stepCount++) {
+      linearFrequencies.add(stepValue * stepCount);
+    }
+
+    // linear_frequencies = math_ops.linspace(
+    // zero, nyquist_hertz, num_spectrogram_bins)[bands_to_zero:]
+
+    // discount slice - we add this back in later
+    linearFrequencies = linearFrequencies.sublist(bandsToZero);
+
+    // create new array with
+    // dim 0 set to (hertzToMel) MEL_HIGH_FREQUENCY_Q * log(1.0 + (frequencies_hertz / MEL_BREAK_FREQUENCY_HERTZ))
+    // new dim of length 1 at axis 1
+    //   spectrogram_bins_mel = array_ops.expand_dims(
+    //       _hertz_to_mel(linear_frequencies), 1)
+
+    List<double> spectrogramBinMel = hertzToMel(linearFrequencies);
+    //spectrogram_bins_mel
+
+    // Returns a tensor with a length 1 axis inserted at index axis.
+
+// Given a tensor input, this operation inserts a dimension of length 1 at the dimension index 'axis' of input's shape. The dimension index follows Python
+// indexing rules: It's zero-based, a negative index it is counted backward from the end.
+
+    // # Compute num_mel_bins triples of (lower_edge, center, upper_edge). The
+    // # center of each band is the lower and upper edge of the adjacent bands.
+    // # Accordingly, we divide [lower_edge_hertz, upper_edge_hertz] into
+    // # num_mel_bins + 2 pieces.
+
+    List<double> bandEdgesMelLinSpace = [];
+    // start at htm(lower), go to htm(upper), step by num_mel_bens + 2,
+    var lowerEdgeMelLin = hertzToMel([lowerEdgeHertz])[0];
+    var upperEdgeMelLin = hertzToMel([upperEdgeHertz])[0];
+    var steppers = (upperEdgeMelLin - lowerEdgeMelLin) / (numMelBins + 2);
+    for (var i = 0; i < (numMelBins + 2); i++) {
+      bandEdgesMelLinSpace.add(steppers * i);
+    }
+
+    List<List<double>> bandEdges = [];
+    // now create a frame using (bandEdgesMelLinSpace, frame_length = 3, and frame_step = 1)
+    for (var i = 1; i < (numMelBins + 1); i++) {
+      // create a new triple with i-1 as lower, i as center, i+1 as upper
+      List<double> newlist = [
+        bandEdgesMelLinSpace[i - 1],
+        bandEdgesMelLinSpace[i],
+        bandEdgesMelLinSpace[i + 1]
+      ];
+      bandEdges.add(newlist);
+    }
+
+    // splitting up the triples:
+    // so we have three tensors at the end, lower_mel, center_mel, and upper_mel
+    // each one is of shape [1, num_mel_bins]
+    // we fill them in from bandEdges
+    // e.g bandEdges: [[0, 1, 2], [1, 2, 3], [2, 3, 4], ...., [39, 40, 41], [40, 41, 42]]
+    // -> lower: [0, 1, 2, 3, ..., num_mel_bins - 2]
+    // -> center: [1, 2, 3, 4, ..., num_mel_bins - 1]
+    // -> upper: [2, 3, 4, 5, ..., num_mel_bins]
+    List<double> lowerMel = [];
+    List<double> centerMel = [];
+    List<double> upperMel = [];
+
+    for (int i = 0; i < bandEdges.length; i++) {
+      // continue up to num_mel_bins - 2
+      lowerMel.add(bandEdges[i][0]);
+      // continue up to num_mel_bins - 1
+      centerMel.add(bandEdges[i][1]);
+      // continue up to bandEdges.length
+      upperMel.add(bandEdges[i][2]);
+    }
+
+    //   # Split the triples up and reshape them into [1, num_mel_bins] tensors.
+    //   lower_edge_mel, center_mel, upper_edge_mel = tuple(array_ops.reshape(
+    //       t, [1, num_mel_bins]) for t in array_ops.split(
+    //           band_edges_mel, 3, axis=1))
+
+    //   # Calculate lower and upper slopes for every spectrogram bin.
+    //   # Line segments are linear in the mel domain, not Hertz.
+    //   lower_slopes = (spectrogram_bins_mel - lower_edge_mel) / (
+    //       center_mel - lower_edge_mel)
+    //   upper_slopes = (upper_edge_mel - spectrogram_bins_mel) / (
+    //       upper_edge_mel - center_mel)
+
+    // a = (centerMel - lowerMel)
+    List<double> a = [];
+    for (var i = 0; i < lowerMel.length; i++) {
+      a.add(centerMel[i] - lowerMel[i]);
+    }
+    // (spectrogramBinMel - lowerMel) / a
+    List<List<double>> lowerSlopes = [];
+    for (var i = 0; i < spectrogramBinMel.length; i++) {
+      lowerSlopes.add([]);
+      for (var j = 0; j < lowerMel.length; j++) {
+        // subtract each element
+        lowerSlopes[i].add((spectrogramBinMel[i] - lowerMel[j]) / a[j]);
+      }
+    } // (256, 40) / (1, 40)
+
+    // b = (upperEdgeMel - centerMel)
+    List<double> b = [];
+    for (var i = 0; i < upperMel.length; i++) {
+      b.add(upperMel[i] - centerMel[i]);
+    }
+    // (upperEdgeMel - spectrogramBinMel) / b
+    List<List<double>> upperSlopes = [];
+    for (var i = 0; i < spectrogramBinMel.length; i++) {
+      upperSlopes.add([]);
+      for (var j = 0; j < upperMel.length; j++) {
+        // subtract each element
+        upperSlopes[i].add((upperMel[j] - spectrogramBinMel[i]) / b[j]);
+      }
+    } // (256, 40) / (1, 40) = (256, 40)
+
+    //   # Intersect the line segments with each other and zero.
+    //   mel_weights_matrix = math_ops.maximum(
+    //       zero, math_ops.minimum(lower_slopes, upper_slopes))
+
+    // 1. get the min elementwise of (lower_slopes and upper_slopes)
+    // 2. get the max elementwise of (0 and new matrix) (ie if the min is less than zero, make it zero)
+    List<List<double>> melWeightsMatrix = [];
+    for (var i = 0; i < lowerSlopes.length; i++) {
+      melWeightsMatrix.add([]);
+      // 256
+      for (var j = 0; j < lowerSlopes[0].length; j++) {
+        // 40
+        var minVal = min(upperSlopes[i][j], lowerSlopes[i][j]);
+        melWeightsMatrix[i].add(minVal > 0 ? minVal : 0);
+      }
+    }
+
+    //   # Re-add the zeroed lower bins we sliced out above.
+    // see: linear_frequencies = math_ops.linspace(zero, nyquist_hertz, num_spectrogram_bins)[bands_to_zero:]   <--- slice
+    //   return array_ops.pad(
+    //       mel_weights_matrix, [[bands_to_zero, 0], [0, 0]], name=name)
+    melWeightsMatrix.insert(0, List.filled(melWeightsMatrix[0].length, 0.0));
+    print(melWeightsMatrix.length);
+
+    /******************LINEAR TO MEL SPECTROGRAM */
+
+    // mel_weights = tf.signal.linear_to_mel_weight_matrix(
+    //     num_mel_bins=num_mel_bins,
+    //     num_spectrogram_bins=tf.shape(S)[2],
+    //     sample_rate=sample_rate,
+    //     lower_edge_hertz=fmin,
+    //     upper_edge_hertz=fmax)
+    // return tf.tensordot(S, mel_weights, 1)
+
+    var melWeights = Matrix.fromList(melWeightsMatrix);
+
+    var specVector = Vector.fromList(powspec);
+
+    // dot(vector, matrix) = vector * matrix
+    // x dot(matrix, vector) != matrix * vector
+
+    var pp = specVector * melWeights;
+
+    print(pp);
 
     /******************* MODEL STUFF *******************/
     // final interpreter = await Interpreter.fromAsset('model.tflite');
@@ -49,9 +317,10 @@ class MainApp extends StatelessWidget {
         body: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
-            children: <Widget> [
+            children: <Widget>[
               const Text('LID Inference'),
-              ElevatedButton(onPressed: btnListener, child: const Text('Press me!'))
+              ElevatedButton(
+                  onPressed: btnListener, child: const Text('Press me!'))
             ],
           ),
         ),
