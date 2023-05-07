@@ -166,7 +166,6 @@ class MainApp extends StatelessWidget {
   Future<void> btnListener() async {
     /******************* SPECTROGRAM STUFF *******************/
     // the resampled audio is in the assets folder under filtered_audio.wav
-    print('hello!');
 
     // 1. create normal spectrogram based on lidbox implementation
     // spectrograms(signal, rate)
@@ -181,13 +180,10 @@ class MainApp extends StatelessWidget {
     var frameLength = msFrames(sampleRate, frameLengthMS);
     var frameStep = msFrames(sampleRate, frameStepMS);
 
-    print(frameStep);
-    print(fftLength);
-
     // https: //pub.dev/documentation/fftea/latest/
 
-    List<double> audio = [1.0, 2.0, 3.0, 4.0];
-    List<double> aud = List.filled(513, 3.5);
+    List<double> audio = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    List<double> aud = List.filled(400, 1.0);
     // (10000) / 160 = num_frames
 
     // final asset = await rootBundle.load("assets/filtered_audio.wav");
@@ -197,12 +193,54 @@ class MainApp extends StatelessWidget {
     // print(oceanWaves.format);
 
     /******************* POWER SPECTROGRAM *****/
+    /*** zero-padding and you (this is unrelated to the problem down below (this one is solved))
+ 
+    the windowing function takes frames of length 400, then steps 160 forward, and then takes another frame of 400 
+    i.e first frame from 0-400, second frame from 160-560, etc.
+    
+    if there are length mismatches 
+    i.e we have an array of length 530, 
+    so it starts at 400, tries to step 160 past that but can't since its out of bounds (400 + 160 = 560 > 530)
+    
+    then there are varying behaviours to deal with this issue
+    
+    the python stft simply cuts out anything that doesn't fit cleanly in its steps
+    so for the 530 example it would cut out everything past 400, and just run the stft with one frame
+    
+    the dart stft pads anything that doesn't fit cleanly with zeros
+    for the 530 example it would pad our audio with zeros until its length 560, and run the stft with two frames
+    
+    we need to mimic the behaviour of the python impl. by clamping the audio at the end point so that it fits cleanly with steps
+    
+    TODO have not tested what happens with audio length < 400, but this should never occur
+     */
 
-    final stft = STFT(fftLength, Window.hanning(fftLength));
+    final int audioLength = aud.length;
+    List<double> clampedAudio =
+        aud.sublist(0, audioLength - ((audioLength - frameLength) % frameStep));
+
+    /* PROBLEM:
+      the chunkSize of the frames needs to be frameLength (400),
+      however the python impl. is sneaky and applies ffts of size 512 on the audio
+      what this means is that it tries to apply an fft on the frame (which will be length 400) with an fft function thats been told the length is 512
+      as you may recall, the python impl. simply zero pads out the frame when doing an fft to ensure they are equal
+      this is a similar problem to the one i had with the inverse fft
+      so we may need to rewrite the stft.run, and ensure that each frame is zero padded out, while using a different fft that is of length 512
+      (while still keeping chunks of 400....)
+    
+     */
+    final stft = STFT(fftLength);
     var spectrogram = <Float64List>[];
-    stft.run(aud, (Float64x2List freq) {
+
+    customSTFT(clampedAudio, (Float64x2List freq) {
+      spectrogram.add(freq.discardConjugates().magnitudes());
+    }, frameLength, frameStep);
+
+    stft.run(clampedAudio, (Float64x2List freq) {
       spectrogram.add(freq.discardConjugates().magnitudes());
     }, frameStep);
+
+    print(spectrogram);
 
     // this is our output for a pow spectrograms
     // TODO fix this, get rid of powspec and rename powpow
@@ -210,16 +248,19 @@ class MainApp extends StatelessWidget {
     spectrogram.forEach((element) {
       powpow.add(element.map((e) => pow(e.abs(), power).toDouble()).toList());
     });
-    print(powpow.length);
-    var powspec =
-        spectrogram[0].map((e) => pow(e.abs(), power).toDouble()).toList();
+
+    //print(powpow[0]);
+
+    //print(powpow[0].length);
 
     /******************* MEL SPECTROGRAM MATRIX WEIGHTS *****/
 
     var melWeights = calculateMelWeightsMatrix(
         numMelBins: 40,
-        numSpectrogramBins: powpow[1].length,
-        sampleRate: 16000);
+        numSpectrogramBins: powpow[0].length,
+        sampleRate: sampleRate,
+        lowerEdgeHertz: fmin,
+        upperEdgeHertz: fmax);
 
     /******************LINEAR TO MEL SPECTROGRAM */
 
@@ -235,7 +276,7 @@ class MainApp extends StatelessWidget {
 
     var spectrogramMatrix = specMatrix * melWeights;
 
-    print("hey there! $spectrogramMatrix");
+    //print("Spectrogram Matrix:  $spectrogramMatrix");
 
     /******************* MODEL STUFF *******************/
     // final interpreter = await Interpreter.fromAsset('model.tflite');
@@ -252,6 +293,47 @@ class MainApp extends StatelessWidget {
     // // run interpreter
     // interpreter.run(input, output);
     // print(output);
+  }
+
+  void customSTFT(
+    List<double> input,
+    Function(Float64x2List) reportChunk,
+    int frameLength, [
+    int chunkStride = 0,
+    int fftLength = 512,
+  ]) {
+    final customfft = FFT(fftLength);
+    final chunk = Float64x2List(fftLength);
+    // we need _fft (the fft in stft object)
+    // and _chunk (an empty Float64x2List on the stft object)
+    //final chunkSize = customfft.size;
+    if (chunkStride <= 0) chunkStride = fftLength;
+    for (int i = 0;; i += chunkStride) {
+      final i2 = i + frameLength;
+      if (i2 > input.length) {
+        int j = 0;
+        final stop = input.length - i;
+        for (; j < stop; ++j) {
+          chunk[j] = Float64x2(input[i + j], 0);
+        }
+        for (; j < frameLength; ++j) {
+          chunk[j] = Float64x2.zero();
+        }
+      } else {
+        for (int j = 0; j < frameLength; ++j) {
+          chunk[j] = Float64x2(input[i + j], 0);
+        }
+      }
+      chunk.forEach((element) {
+        print(element);
+      });
+      //_win?.inPlaceApplyWindow(chunk); windowing function
+      customfft.inPlaceFft(chunk);
+      reportChunk(chunk);
+      if (i2 >= input.length) {
+        break;
+      }
+    }
   }
 
   @override
