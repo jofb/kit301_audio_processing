@@ -16,6 +16,7 @@ import 'audio_processing.dart';
 import 'package:wav/wav.dart';
 import 'package:ml_linalg/linalg.dart';
 // import 'package:dart_tensor/dart_tensor.dart';
+import 'package:scidart/scidart.dart';
 
 void main() {
   runApp(const MainApp());
@@ -183,7 +184,7 @@ class MainApp extends StatelessWidget {
     // https: //pub.dev/documentation/fftea/latest/
 
     List<double> audio = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-    List<double> aud = List.filled(400, 1.0);
+    List<double> aud = List.filled(512, 1.0);
     // (10000) / 160 = num_frames
 
     // final asset = await rootBundle.load("assets/filtered_audio.wav");
@@ -229,18 +230,22 @@ class MainApp extends StatelessWidget {
       (while still keeping chunks of 400....)
     
      */
-    final stft = STFT(fftLength);
+    //final stft = STFT(fftLength, Window.hanning(fftLength));
     var spectrogram = <Float64List>[];
 
     customSTFT(clampedAudio, (Float64x2List freq) {
       spectrogram.add(freq.discardConjugates().magnitudes());
-    }, frameLength, frameStep);
+    }, frameLength, frameStep, fftLength,
+        Window.hanning(frameLength)); //Window.hanning(frameLength)
 
-    stft.run(clampedAudio, (Float64x2List freq) {
-      spectrogram.add(freq.discardConjugates().magnitudes());
-    }, frameStep);
+    // stft.run(aud, (Float64x2List freq) {
+    //   spectrogram.add(freq.discardConjugates().magnitudes());
+    // }, frameStep);
 
-    print(spectrogram);
+    print(spectrogram[0][100]);
+    // spectrogram[0].forEach((element) {
+    //   print(element);
+    // });
 
     // this is our output for a pow spectrograms
     // TODO fix this, get rid of powspec and rename powpow
@@ -295,18 +300,13 @@ class MainApp extends StatelessWidget {
     // print(output);
   }
 
+  // adapted from stft.run
   void customSTFT(
-    List<double> input,
-    Function(Float64x2List) reportChunk,
-    int frameLength, [
-    int chunkStride = 0,
-    int fftLength = 512,
-  ]) {
+      List<double> input, Function(Float64x2List) reportChunk, int frameLength,
+      [int chunkStride = 0, int fftLength = 512, Float64List? win]) {
     final customfft = FFT(fftLength);
-    final chunk = Float64x2List(fftLength);
-    // we need _fft (the fft in stft object)
-    // and _chunk (an empty Float64x2List on the stft object)
-    //final chunkSize = customfft.size;
+    var chunk = Float64x2List(fftLength);
+    var chunk2 = Float64List(fftLength);
     if (chunkStride <= 0) chunkStride = fftLength;
     for (int i = 0;; i += chunkStride) {
       final i2 = i + frameLength;
@@ -315,21 +315,49 @@ class MainApp extends StatelessWidget {
         final stop = input.length - i;
         for (; j < stop; ++j) {
           chunk[j] = Float64x2(input[i + j], 0);
+          chunk2[j] = input[i + j];
         }
         for (; j < frameLength; ++j) {
           chunk[j] = Float64x2.zero();
+          chunk2[j] = 0;
         }
       } else {
         for (int j = 0; j < frameLength; ++j) {
           chunk[j] = Float64x2(input[i + j], 0);
+          chunk2[j] = input[i + j];
         }
       }
-      chunk.forEach((element) {
-        print(element);
-      });
-      //_win?.inPlaceApplyWindow(chunk); windowing function
+      // apply our window on first frameLength elements instead of entire array
+      if (win != null) {
+        // TODO only assign to first frameLength elements
+        // var padding = Float64x2List(112);
+        // chunk =
+        chunk2.setRange(0, frameLength,
+            win.applyWindowReal(chunk2.sublist(0, frameLength)));
+
+        // we use a scidart hanning here because it gives us the option of a periodic window
+        var wind = hann(frameLength, sym: false);
+        Float64List choochoo = Float64List(frameLength);
+        for (int i = 0; i < frameLength; i++) {
+          choochoo[i] = wind[i];
+        }
+        // WE BELIEVE THIS IS A SYMMETRIC WINDOW, WE NEED PERIODIC
+        var windowRes = win.applyWindow(chunk.sublist(0, frameLength));
+
+        // TODO CLEAN THIS UP, ALSO LOOK INTO INACCURACIES WITH THE WINDOWING, AND POTENTIALLY THE FFT FUNCTION
+        chunk.setRange(0, frameLength,
+            choochoo.applyWindow(chunk.sublist(0, frameLength)));
+      }
+
+      //chunk = win?.applyWindow(chunk.sublist(0, frameLength))?? chunk;
+      // add more zero padding
+
+      // chunk = win?.applyWindow(chunk); //windowing function
+      // pad our zeroes here instead of before windowing
       customfft.inPlaceFft(chunk);
+      Float64x2List hunk = customfft.realFft(chunk2);
       reportChunk(chunk);
+      //reportChunk(hunk);
       if (i2 >= input.length) {
         break;
       }
