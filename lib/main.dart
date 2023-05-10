@@ -2,6 +2,7 @@ import 'dart:ffi';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_sound/flutter_sound.dart';
 import 'package:scidart/numdart.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'dart:math';
@@ -24,6 +25,31 @@ void main() {
 
 class MainApp extends StatelessWidget {
   const MainApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'LID Inference',
+      home: Scaffold(
+        body: Center(
+          child: languageIdWidget(),
+        ),
+      ),
+    );
+  }
+}
+
+class languageIdWidget extends StatefulWidget {
+  const languageIdWidget({
+    super.key,
+  });
+
+  @override
+  State<languageIdWidget> createState() => _languageIdWidgetState();
+}
+
+class _languageIdWidgetState extends State<languageIdWidget> {
+  String identifiedLanguage = "";
 
   // mel spectrum constants.
   final MEL_BREAK_FREQUENCY_HERTZ = 700.0;
@@ -164,7 +190,7 @@ class MainApp extends StatelessWidget {
     return Matrix.fromList(melWeightsMatrix);
   }
 
-  Future<void> btnListener() async {
+  Future<void> identifyAudio() async {
     /******************* SPECTROGRAM STUFF *******************/
     // the resampled audio is in the assets folder under filtered_audio.wav
 
@@ -181,16 +207,29 @@ class MainApp extends StatelessWidget {
     var frameLength = msFrames(sampleRate, frameLengthMS);
     var frameStep = msFrames(sampleRate, frameStepMS);
 
-    // https: //pub.dev/documentation/fftea/latest/
-
     List<double> audio = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-    List<double> aud = List.filled(512, 1.0);
+    List<double> aud = List.filled(512, 0.00034);
     // (10000) / 160 = num_frames
 
-    // final asset = await rootBundle.load("assets/filtered_audio.wav");
+    // this block reads in the resampled audio from assets, saves it to cache, then reads it as a wav file
+    final asset = await rootBundle.load("assets/filtered_audio.wav");
+    final tempDir = await getTemporaryDirectory();
+    final file = File("${tempDir.path}/mysoundfile.wav");
+    await file.writeAsBytes(asset.buffer.asUint8List());
+
+    final oceanWaves = await Wav.readFile("${tempDir.path}/mysoundfile.wav");
+
+    //final owaves2 = await getPCMData("${tempDir.path}/mysoundfile.wav");
+    //print(owaves2.length);
+    // aud = owaves2;
+    aud = oceanWaves.toMono();
+
+    // now save to cache
+
     // final buffer = asset.buffer;
 
-    // final oceanWaves = await Wav.readFile('assets/filtered_audio.wav');
+    //final oceanWaves = await Wav.readFile('assets/filtered_audio.wav');
+    //print(oceanWaves);
     // print(oceanWaves.format);
 
     /******************* POWER SPECTROGRAM *****/
@@ -233,19 +272,17 @@ class MainApp extends StatelessWidget {
     //final stft = STFT(fftLength, Window.hanning(fftLength));
     var spectrogram = <Float64List>[];
 
+    // clampedAudio =
+    //     clampedAudio.sublist(0, 23441); // > 23440 we start getting infinity
+    // print(clampedAudio[23440]);
+
+    // 23440 - 400 = 23040
+    // 23040 / 160 = 144
+
     customSTFT(clampedAudio, (Float64x2List freq) {
       spectrogram.add(freq.discardConjugates().magnitudes());
     }, frameLength, frameStep, fftLength,
         Window.hanning(frameLength)); //Window.hanning(frameLength)
-
-    // stft.run(aud, (Float64x2List freq) {
-    //   spectrogram.add(freq.discardConjugates().magnitudes());
-    // }, frameStep);
-
-    print(spectrogram[0][100]);
-    // spectrogram[0].forEach((element) {
-    //   print(element);
-    // });
 
     // this is our output for a pow spectrograms
     // TODO fix this, get rid of powspec and rename powpow
@@ -279,25 +316,88 @@ class MainApp extends StatelessWidget {
 
     var specMatrix = Matrix.fromList(powpow);
 
+    // NOT SURE IF THIS IS EQUIVALENT TO A DOT (IM STUPID MATRIX MATH)
     var spectrogramMatrix = specMatrix * melWeights;
+
+    // spectrogram.toList().forEach((element) {
+    //   element.forEach((e) {
+    //     if (e.isInfinite) {
+    //       print("hrewqhoriqw $element");
+    //     }
+    //   });
+    // });
 
     //print("Spectrogram Matrix:  $spectrogramMatrix");
 
+    /******************* LOG SCALE ********************/
+
+    // var mynewmatrix = spectrogramMatrix;
+    var mynewmatrix =
+        spectrogramMatrix.mapElements((element) => log(element + 1e-06));
+
+    // var countedInfinities = 0;
+    // melWeights.forEach((element) {
+    //   for (var i = 0; i < element.length; i++) {
+    //     if (element.toList()[i].isInfinite) {
+    //       countedInfinities++;
+    //     }
+    //   }
+    // });
+    // print("Infinite rows: $countedInfinities");
+
+    // try only using one row of the matrix
+    // var testmatrix = mynewmatrix.toList().sublist(21);
+    // INFINITY ON 21ST ELEMENT
+
+    // TWO PROBLEMS
+    // 1. INPUTS WRONG
+    // 2. MODEL DOESNT LIKE THE INPUT
+
     /******************* MODEL STUFF *******************/
-    // final interpreter = await Interpreter.fromAsset('model.tflite');
-    //
-    // // grab shapes
-    // // TODO figure out resizing
-    // // shape: (num_batch, num_frames, 40)
-    // interpreter.resizeInputTensor(0, [1, 1, 40]);
-    // var inputShape = interpreter.getInputTensor(0).shape;
-    // var outputShape = interpreter.getOutputTensor(0).shape;
-    // // set shapes on dummy data and output tensor
+    final interpreter = await Interpreter.fromAsset('model.tflite');
+    // grab shapes
+    // TODO figure out resizing
+    // shape: (num_batch, num_frames, 40)
+    interpreter.resizeInputTensor(0, [1, mynewmatrix.rows.length, 40]);
+    // interpreter.resizeInputTensor(0, [1, testmatrix.length, 40]);
+    interpreter.allocateTensors();
+    var inputShape = interpreter.getInputTensor(0).shape;
+    var outputShape = interpreter.getOutputTensor(0).shape;
+    // set shapes on dummy data and output tensor
     // var input = List.filled(40, Random().nextDouble()).reshape(inputShape);
-    // var output = List.filled(1*4, 0).reshape(outputShape);
-    // // run interpreter
-    // interpreter.run(input, output);
-    // print(output);
+    // reshape spectrogrammatrix to fit shape (num_frames, 40) -> (1, num_frames, 40)
+    // var input = mynewmatrix.toList().reshape(inputShape);
+    var input = mynewmatrix.toList().reshape(inputShape);
+    var output = List.filled(4, 0).reshape(outputShape);
+    // run interpreter
+    interpreter.run(input, output);
+    print(output);
+
+    var languages = ["Estonian", "Mongolian", "Tamil", "Turkish"];
+    List<double> convertedOutput = output[0] as List<double>;
+
+    var THEONELANG =
+        languages[convertedOutput.indexOf(convertedOutput.reduce(max))];
+    setState(() {
+      identifiedLanguage = THEONELANG;
+    });
+  }
+
+  void playAudio() async {
+    final tempDir = await getTemporaryDirectory();
+
+    final asset = await rootBundle.load("assets/filtered_audio.wav");
+    final file = File("${tempDir.path}/coolfile.wav");
+    await file.writeAsBytes(asset.buffer.asUint8List());
+
+    // open up sound player
+    final audioPlayer = FlutterSoundPlayer();
+    await audioPlayer.openPlayer();
+
+    // load audio file and play
+    await audioPlayer.startPlayer(
+        fromURI: "${tempDir.path}/coolfile.wav",
+        whenFinished: () => audioPlayer.closePlayer());
   }
 
   // adapted from stft.run
@@ -356,8 +456,8 @@ class MainApp extends StatelessWidget {
       // pad our zeroes here instead of before windowing
       customfft.inPlaceFft(chunk);
       Float64x2List hunk = customfft.realFft(chunk2);
-      reportChunk(chunk);
-      //reportChunk(hunk);
+      //reportChunk(chunk);
+      reportChunk(hunk);
       if (i2 >= input.length) {
         break;
       }
@@ -366,20 +466,30 @@ class MainApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'LID Inference',
-      home: Scaffold(
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: <Widget>[
-              const Text('LID Inference'),
-              ElevatedButton(
-                  onPressed: btnListener, child: const Text('Press me!'))
-            ],
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: <Widget>[
+        const Text('LID Inference'),
+        ElevatedButton(
+            style: ButtonStyle(
+              backgroundColor: MaterialStatePropertyAll<Color>(Colors.green),
+            ),
+            onPressed: playAudio,
+            child: const Text('Play Audio')),
+        ElevatedButton(
+            style: ButtonStyle(
+              backgroundColor: MaterialStatePropertyAll<Color>(Colors.pink),
+            ),
+            onPressed: identifyAudio,
+            child: const Text('Identify Language!')),
+        Text(
+          "Identified Language: $identifiedLanguage",
+          style: TextStyle(
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
           ),
         ),
-      ),
+      ],
     );
   }
 }
