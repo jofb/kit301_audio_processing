@@ -50,6 +50,7 @@ class languageIdWidget extends StatefulWidget {
 
 class _languageIdWidgetState extends State<languageIdWidget> {
   String identifiedLanguage = "";
+  String languageToIdentifyPath = "filtered_audio";
 
   // mel spectrum constants.
   final MEL_BREAK_FREQUENCY_HERTZ = 700.0;
@@ -66,6 +67,11 @@ class _languageIdWidgetState extends State<languageIdWidget> {
             MEL_HIGH_FREQUENCY_Q *
             log(1.0 + (frequency / MEL_BREAK_FREQUENCY_HERTZ)))
         .toList();
+  }
+
+  Matrix cmvn(Matrix x) {
+    Matrix y = x.mapColumns((col) => Vector.filled(col.length, col.mean()));
+    return x - y;
   }
 
   Matrix calculateMelWeightsMatrix(
@@ -88,10 +94,13 @@ class _languageIdWidgetState extends State<languageIdWidget> {
 
     // create linspace from 0 to nyquistHertz
     var nyquistHertz = sampleRate / 2.0;
-    var stepValue = nyquistHertz / numSpectrogramBins;
-    for (var stepCount = 1; stepCount <= numSpectrogramBins; stepCount++) {
-      linearFrequencies.add(stepValue * stepCount);
-    }
+    /* FIX ONE - THIS WAS PRODUCING WRONG VALUES, USING LINSPACE NOW */
+    // var stepValue = nyquistHertz / numSpectrogramBins;
+    // for (var stepCount = 1; stepCount <= numSpectrogramBins; stepCount++) {
+    //   linearFrequencies.add(stepValue * stepCount);
+    // }
+
+    linearFrequencies = linspace(0, nyquistHertz, num: numSpectrogramBins);
 
     // slice from bandsToZero, we will add this back later
     linearFrequencies = linearFrequencies.sublist(bandsToZero);
@@ -104,10 +113,14 @@ class _languageIdWidgetState extends State<languageIdWidget> {
     // start at htm(lower), go to htm(upper), step by num_mel_bens + 2,
     var lowerEdgeMelLin = hertzToMel([lowerEdgeHertz])[0];
     var upperEdgeMelLin = hertzToMel([upperEdgeHertz])[0];
-    var edgeStep = (upperEdgeMelLin - lowerEdgeMelLin) / (numMelBins + 2);
-    for (var i = 0; i < (numMelBins + 2); i++) {
-      bandEdgesMelLinSpace.add(edgeStep * i);
-    }
+    /* FIX TWO - SAME AS FIX ONE */
+    // var edgeStep = (upperEdgeMelLin - lowerEdgeMelLin) / (numMelBins + 2);
+    // for (var i = 0; i < (numMelBins + 2); i++) {
+    //   bandEdgesMelLinSpace.add(edgeStep * i);
+    // }
+
+    bandEdgesMelLinSpace =
+        linspace(lowerEdgeMelLin, upperEdgeMelLin, num: numMelBins + 2);
 
     // create the triples in one array
     List<List<double>> bandEdges = [];
@@ -135,6 +148,8 @@ class _languageIdWidgetState extends State<languageIdWidget> {
       // continue up to bandEdges.length
       upperMel.add(bandEdges[i][2]);
     }
+
+    // this is correct up to this point
 
     /******** Calculating the slopes *********/
     // lower slope
@@ -184,9 +199,9 @@ class _languageIdWidgetState extends State<languageIdWidget> {
 
     // Re-add the zeroed lower bins we sliced out above.
     melWeightsMatrix.insert(0, List.filled(melWeightsMatrix[0].length, 0.0));
-
     // we can either return this as a List<List<double>> or convert ot a Matrix here
     // for now lets return a matrix
+
     return Matrix.fromList(melWeightsMatrix);
   }
 
@@ -212,7 +227,7 @@ class _languageIdWidgetState extends State<languageIdWidget> {
     // (10000) / 160 = num_frames
 
     // this block reads in the resampled audio from assets, saves it to cache, then reads it as a wav file
-    final asset = await rootBundle.load("assets/filtered_audio.wav");
+    final asset = await rootBundle.load("assets/${languageToIdentifyPath}.wav");
     final tempDir = await getTemporaryDirectory();
     final file = File("${tempDir.path}/mysoundfile.wav");
     await file.writeAsBytes(asset.buffer.asUint8List());
@@ -335,16 +350,8 @@ class _languageIdWidgetState extends State<languageIdWidget> {
     var mynewmatrix =
         spectrogramMatrix.mapElements((element) => log(element + 1e-06));
 
-    // var countedInfinities = 0;
-    // melWeights.forEach((element) {
-    //   for (var i = 0; i < element.length; i++) {
-    //     if (element.toList()[i].isInfinite) {
-    //       countedInfinities++;
-    //     }
-    //   }
-    // });
-    // print("Infinite rows: $countedInfinities");
-
+    // this is new
+    mynewmatrix = cmvn(mynewmatrix);
     // try only using one row of the matrix
     // var testmatrix = mynewmatrix.toList().sublist(21);
     // INFINITY ON 21ST ELEMENT
@@ -383,10 +390,10 @@ class _languageIdWidgetState extends State<languageIdWidget> {
     });
   }
 
-  void playAudio() async {
+  void playAudio(String path) async {
     final tempDir = await getTemporaryDirectory();
 
-    final asset = await rootBundle.load("assets/filtered_audio.wav");
+    final asset = await rootBundle.load("assets/${path}");
     final file = File("${tempDir.path}/coolfile.wav");
     await file.writeAsBytes(asset.buffer.asUint8List());
 
@@ -474,8 +481,42 @@ class _languageIdWidgetState extends State<languageIdWidget> {
             style: ButtonStyle(
               backgroundColor: MaterialStatePropertyAll<Color>(Colors.green),
             ),
-            onPressed: playAudio,
-            child: const Text('Play Audio')),
+            onPressed: () {
+              languageToIdentifyPath = "filtered_audio";
+              playAudio("filtered_audio.wav");
+              print("Playing Estonian audio");
+            },
+            child: const Text('Play Estonian Audio')),
+        ElevatedButton(
+            style: ButtonStyle(
+              backgroundColor: MaterialStatePropertyAll<Color>(Colors.green),
+            ),
+            onPressed: () {
+              languageToIdentifyPath = "filtered_audio_mn";
+              playAudio("filtered_audio_mn.wav");
+              print("Playing Mongolion audio");
+            },
+            child: const Text('Play Mongolion Audio')),
+        ElevatedButton(
+            style: ButtonStyle(
+              backgroundColor: MaterialStatePropertyAll<Color>(Colors.green),
+            ),
+            onPressed: () {
+              languageToIdentifyPath = "filtered_audio_tr";
+              playAudio("filtered_audio_tr.wav");
+              print("Playing Turkish audio");
+            },
+            child: const Text('Play Turkish Audio')),
+        ElevatedButton(
+            style: ButtonStyle(
+              backgroundColor: MaterialStatePropertyAll<Color>(Colors.green),
+            ),
+            onPressed: () {
+              languageToIdentifyPath = "filtered_audio_ta";
+              playAudio("filtered_audio_ta.wav");
+              print("Playing Tamil audio");
+            },
+            child: const Text('Play Tamil Audio')),
         ElevatedButton(
             style: ButtonStyle(
               backgroundColor: MaterialStatePropertyAll<Color>(Colors.pink),
